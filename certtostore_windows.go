@@ -25,6 +25,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -241,6 +242,12 @@ type pkcs1PaddingInfo struct {
 type pssPaddingInfo struct {
 	pszAlgID *uint16
 	cbSalt   uint32
+}
+
+// cryptHashBlob is the CRYPT_HASH_BLOB struct in wincrypt.h.
+type cryptHashBlob struct {
+	cbData uint32
+	pbData *byte
 }
 
 // wide returns a pointer to a a uint16 representing the equivalent
@@ -1866,4 +1873,61 @@ func (w *WinCertStore) ListCertificates() ([]*x509.Certificate, error) {
 	}
 
 	return certs, nil
+}
+
+// CertBySHA1Hash searches for a certificate by its SHA1 hash in the store.
+// The hash must be provided as a hex-encoded string, containing only hexadecimal
+// characters.
+// The returned *windows.CertContext must be freed by the caller using
+// FreeCertContext to avoid resource leaks.
+func (w *WinCertStore) CertBySHA1Hash(hash string) (*x509.Certificate,
+	*windows.CertContext, [][]*x509.Certificate, error) {
+	storeHandle, err := w.storeHandle(w.storeDomain(), my)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to open certificate store: %v", err)
+	}
+
+	// Convert hex string to binary data
+	hashBytes, err := hex.DecodeString(hash)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("invalid hex string: %v", err)
+	}
+
+	// Create CRYPT_HASH_BLOB structure
+	hashBlob := cryptHashBlob{
+		cbData: uint32(len(hashBytes)),
+		pbData: &hashBytes[0],
+	}
+
+	var certContext *windows.CertContext
+	var cert *x509.Certificate
+	for {
+		certContext, err = findCert(
+			storeHandle,
+			encodingX509ASN|encodingPKCS7,
+			0,
+			windows.CERT_FIND_SHA1_HASH,
+			(*uint16)(unsafe.Pointer(&hashBlob)),
+			certContext,
+		)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("could not find certificate by SHA1 hash %q: %w",
+				hash, err)
+		}
+		if certContext == nil {
+			break // No more certificates found
+		}
+		cert, err = certContextToX509(certContext)
+		if err != nil {
+			FreeCertContext(certContext) // Free context to avoid memory leak
+			continue                     // Skip invalid certificates
+		}
+		if err := w.resolveChains(certContext); err != nil {
+			FreeCertContext(certContext)
+			return nil, nil, nil, err
+		}
+		// Found a valid certificate, return it.
+		return cert, certContext, w.certChains, nil
+	}
+	return nil, nil, nil, cryptENotFound
 }
