@@ -1896,35 +1896,34 @@ func (w *WinCertStore) CertBySHA1Hash(hash string) (*x509.Certificate,
 		pbData: &hashBytes[0],
 	}
 
-	var certContext *windows.CertContext
-	var cert *x509.Certificate
-	for {
-		certContext, err = findCert(
-			storeHandle,
-			encodingX509ASN|encodingPKCS7,
-			0,
-			windows.CERT_FIND_SHA1_HASH,
-			(*uint16)(unsafe.Pointer(&hashBlob)),
-			certContext,
-		)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("could not find certificate by SHA1 hash %q: %w",
-				hash, err)
-		}
-		if certContext == nil {
-			break // No more certificates found
-		}
-		cert, err = certContextToX509(certContext)
-		if err != nil {
-			FreeCertContext(certContext) // Free context to avoid memory leak
-			continue                     // Skip invalid certificates
-		}
-		if err := w.resolveChains(certContext); err != nil {
-			FreeCertContext(certContext)
-			return nil, nil, nil, err
-		}
-		// Found a valid certificate, return it.
-		return cert, certContext, w.certChains, nil
+	// Find the certificate by its SHA1 hash, there can be only one so the `prev` context is NULL.
+	certContext, err := findCert(
+		storeHandle,
+		encodingX509ASN|encodingPKCS7,
+		0,
+		windows.CERT_FIND_SHA1_HASH,
+		(*uint16)(unsafe.Pointer(&hashBlob)),
+		nil,
+	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("could not find certificate by SHA1 hash %q: %w",
+			hash, err)
 	}
-	return nil, nil, nil, cryptENotFound
+	if certContext == nil {
+		return nil, nil, nil, cryptENotFound
+	}
+
+	cert, err := certContextToX509(certContext)
+	if err != nil {
+		FreeCertContext(certContext) // Free context to avoid memory leak
+		return nil, nil, nil, err
+	}
+
+	if err := w.resolveChains(certContext); err != nil {
+		FreeCertContext(certContext) // Free context to avoid memory leak
+		return nil, nil, nil, err
+	}
+
+	// Found a valid certificate, return it.
+	return cert, certContext, w.certChains, nil
 }
